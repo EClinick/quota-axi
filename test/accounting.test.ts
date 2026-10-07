@@ -510,6 +510,128 @@ describe("offline accounting executable", () => {
     ).toBeNull();
   });
 
+  it.each([
+    {
+      name: "malformed JSON",
+      gap: Buffer.from('{"type":"turn_context",'),
+      reason: "malformed_record",
+      truncated: false,
+    },
+    {
+      name: "invalid UTF-8",
+      gap: Buffer.from([0xc3, 0x28]),
+      reason: "malformed_record",
+      truncated: false,
+    },
+    ...[2048, 70000].map((size) => ({
+      name: `oversized context with ${size} padding bytes`,
+      gap: Buffer.from(
+        JSON.stringify({
+          type: "turn_context",
+          payload: {
+            model: "gpt-5.1-codex",
+            service_tier: "priority",
+            padding: sentinel.repeat(Math.ceil(size / sentinel.length)),
+          },
+        }),
+      ),
+      reason: "line_byte_limit",
+      truncated: true,
+    })),
+  ])(
+    "invalidates inherited Codex metadata after $name",
+    ({ gap, reason, truncated }) => {
+      const event = (
+        index: number,
+        metadata: { model?: string; service_tier?: string } = {},
+      ) => {
+        const row = codex(
+          counter(index * 100, index * 20, index * 10),
+          counter(100, 20, 10),
+          `2026-10-07T12:0${index}:00Z`,
+        );
+        return {
+          ...row,
+          payload: {
+            ...row.payload,
+            info: { ...row.payload.info, ...metadata },
+          },
+        };
+      };
+      const prefix = [session, context, event(1)]
+        .map((row) => JSON.stringify(row) + "\n")
+        .join("");
+      const suffix = [
+        event(2),
+        event(3, { model: "gpt-5.1-codex" }),
+        event(4, { service_tier: "flex" }),
+        event(5, { model: "gpt-5.1-codex", service_tier: "flex" }),
+        event(6),
+        {
+          type: "turn_context",
+          payload: { model: "gpt-5.2-codex", service_tier: "priority" },
+        },
+        event(7),
+      ]
+        .map((row) => JSON.stringify(row) + "\n")
+        .join("");
+      writeFileSync(
+        fixture("sessions/gaps.jsonl", []),
+        Buffer.concat([Buffer.from(prefix), gap, Buffer.from("\n" + suffix)]),
+      );
+      const report = run([
+        "--provider",
+        "codex",
+        "--codex-root",
+        home,
+        "--max-line-bytes",
+        "1024",
+      ]);
+      expect(
+        report.records.map((record) => [
+          record.model,
+          record.serviceTier.status,
+          record.serviceTier.value,
+        ]),
+      ).toEqual([
+        ["gpt-5-codex", "known", "fast"],
+        [null, "unknown", null],
+        ["gpt-5.1-codex", "unknown", null],
+        [null, "known", "flex"],
+        ["gpt-5.1-codex", "known", "flex"],
+        [null, "unknown", null],
+        ["gpt-5.2-codex", "known", "priority"],
+      ]);
+      for (const record of report.records) {
+        expect(record.tokens).toEqual({
+          input: 80,
+          cacheRead: 20,
+          cacheWrite5m: 0,
+          cacheWrite1h: 0,
+          cacheWriteUnknown: 0,
+          output: 10,
+          reasoning: 0,
+        });
+        expect(record.contextTokens).toEqual({ status: "known", value: 100 });
+      }
+      expect(report.records.map((record) => record.warnings)).toEqual([
+        [],
+        ["unknown_model", "unknown_service_tier"],
+        ["unknown_service_tier"],
+        ["unknown_model"],
+        [],
+        ["unknown_model", "unknown_service_tier"],
+        [],
+      ]);
+      expect(report.sources[0]).toMatchObject({
+        coverage: "partial",
+        replacementSafe: false,
+        reasons: [reason],
+        truncated,
+      });
+    },
+  );
+
   it("retains known Codex usage when optional reasoning counters are absent", () => {
     const row = codex(counter(100, 20, 10));
     delete (

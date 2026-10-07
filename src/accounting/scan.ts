@@ -204,6 +204,7 @@ export async function collectAccounting(
               );
               if (record) accept(record);
             } catch {
+              parser.gap();
               reason(current, "malformed_record");
             }
           };
@@ -251,6 +252,7 @@ export async function collectAccounting(
                 line++;
                 lines++;
                 current.lines++;
+                parser.gap();
                 reason(current, "line_byte_limit", true);
               }
               pending = new Uint8Array(0);
@@ -267,6 +269,7 @@ export async function collectAccounting(
             if (pending.length + tail.length > options.limits.maxLineBytes) {
               pending = new Uint8Array(0);
               discard = true;
+              parser.gap();
               reason(current, "line_byte_limit", true);
             } else if (!discard) pending = concatenate(pending, tail);
           }

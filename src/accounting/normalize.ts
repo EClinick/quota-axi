@@ -78,6 +78,11 @@ export class UsageParser {
     private observe: (time: string) => void,
   ) {}
 
+  gap(): void {
+    this.currentModel = null;
+    this.currentTier = null;
+  }
+
   parse(raw: unknown, line: number): AccountingRecord | null {
     const row = object(raw);
     if (this.provider === "claude") return this.claude(row, line);
