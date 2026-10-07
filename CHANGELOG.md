@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.60](https://github.com/kunchenguid/quota-axi/compare/quota-axi-v0.1.59...quota-axi-v0.1.60) (2026-10-07)
+
+
+### Bug Fixes
+
+* **agy:** retire stale cache when Antigravity is definitively uninstalled ([#319](https://github.com/kunchenguid/quota-axi/issues/319)) ([f3ce0fc](https://github.com/kunchenguid/quota-axi/commit/f3ce0fc83e62fc520051523a9c19c61c9b0a620f))
+
 ## [0.1.59](https://github.com/kunchenguid/quota-axi/compare/quota-axi-v0.1.58...quota-axi-v0.1.59) (2026-10-07)
 
 
