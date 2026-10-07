@@ -326,18 +326,26 @@ It is generated from `src/skill.ts` as a minimal stub: discovery frontmatter, wh
 - **Host network policy** - Claude, Codex, Copilot, Cursor, Grok, Z.AI, Command Code, MiniMax, DeepSeek, OpenRouter, ElevenLabs, Devin, and Muse outbound HTTP calls honor standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables (including lowercase forms). This only follows the user's configured egress path; quota-axi does not expose a proxy service or print proxy URLs. New remote fetches go through `src/lib/http.ts` rather than global `fetch`. The proxy path pairs the installed `undici` build's `ProxyAgent` with that same build's `fetch`, because Node's global fetch only accepts a dispatcher from the undici build Node bundles.
 - **Opt-in secure-store access** - macOS Claude, Cursor CLI, Copilot CLI, and Muse Keychain value reads, plus Windows Copilot Credential Manager reads, are skipped on plain calls until `--allow-keychain-prompt` succeeds once for that source, then future quota calls reuse the corresponding grant.
 - **Delegated refresh, never minted** - when the same stored access token is expired, carries a refresh token, and is definitively rejected, quota-axi may run that vendor CLI's own smallest non-interactive refresh command and re-read the store the CLI rewrote. quota-axi never performs a refresh-token exchange itself. See [Delegated credential refresh](#delegated-credential-refresh).
-- **Partial success is success** - one provider can fail while another returns fresh or stale data, and the process still exits 0. Exit code 1 means every provider failed and the report is still rendered. Exit code 2 is a usage error (`VALIDATION_ERROR`). `quota` is the implicit default command: a bare call or a flag-first call is read as `quota`, while `auth`, `update`, a single-token `--help`, and a version flag stay with the SDK. Slow-path routing, help, exit framing, and `update` come from `axi-sdk-js` `runAxiCli`; machine TOON/JSON stays in `src/render.ts` and command bodies in `src/commands.ts`. A bare `-v`/`-V`/`--version` is answered by `axi-sdk-js/fast-path` plus the leaf `src/version.ts` (node builtins only), which imports the CLI only on the slow path so the provider graph never loads. Keep `src/version.ts` leaf-clean.
+- **Partial quota success is success** - one provider can fail while another returns fresh or stale data, and the quota command still exits 0.
+  Exit code 1 means every provider failed and the report is still rendered.
+  Exit code 2 is a usage error (`VALIDATION_ERROR`).
+  `quota` is the implicit default command: a bare call or a flag-first call is read as `quota`, while `auth`, `models`, `update`, a single-token `--help`, and a version flag stay with the SDK.
+  SDK routing, help, exit framing, and `update` come from `axi-sdk-js` `runAxiCli`; quota/auth/models TOON/JSON stays in `src/render.ts` and command bodies in `src/commands.ts`.
+  The [accounting prototype](docs/accounting.md) takes a separate command-first path with its own output and exit contract.
+  A bare `-v`/`-V`/`--version` is answered by `axi-sdk-js/fast-path` plus the leaf `src/version.ts` (node builtins only), which imports the CLI only on the slow path so the provider graph never loads.
+  Keep `src/version.ts` leaf-clean.
 - **No token equivalence** - quota-axi does not claim that one provider percentage equals another provider percentage.
 
 ## CLI Reference
 
-| Command          | Description                                          |
-| ---------------- | ---------------------------------------------------- |
-| `quota-axi`      | Report supported local quota windows                 |
-| `auth`           | Report local auth-source availability, no values     |
-| `models`         | Join curated model buckets with local quota evidence |
-| `update`         | Upgrade quota-axi to the latest published version    |
-| `update --check` | Report current vs. latest without installing         |
+| Command          | Description                                             |
+| ---------------- | ------------------------------------------------------- |
+| `quota-axi`      | Report supported local quota windows                    |
+| `auth`           | Report local auth-source availability, no values        |
+| `models`         | Join curated model buckets with local quota evidence    |
+| `accounting`     | Opt-in [local accounting prototype](docs/accounting.md) |
+| `update`         | Upgrade quota-axi to the latest published version       |
+| `update --check` | Report current vs. latest without installing            |
 
 ### Flags
 
