@@ -37,21 +37,34 @@ function fixture(path: string, rows: unknown[], tail = ""): string {
   );
   return full;
 }
-function run(extra: string[] = []): AccountingResponse {
-  const result = invoke(["accounting", "--from", from, "--to", to, ...extra]);
+function run(
+  extra: string[] = [],
+  mutation?: "append" | "rewrite",
+): AccountingResponse {
+  const result = invoke(
+    ["accounting", "--from", from, "--to", to, ...extra],
+    mutation,
+  );
   expect(result.status, result.stderr + result.stdout).toBe(0);
   expect(result.stderr).toBe("");
   expect(result.stdout).not.toContain(sentinel);
   expect(result.stdout).not.toContain(home);
   return JSON.parse(result.stdout);
 }
-function invoke(args: string[]) {
-  return execute([resolve("dist/bin/quota-axi.js"), ...args]);
+function invoke(args: string[], mutation?: "append" | "rewrite") {
+  return execute([resolve("dist/bin/quota-axi.js"), ...args], mutation);
 }
-function execute(args: string[]) {
+function execute(args: string[], mutation?: "append" | "rewrite") {
   return spawnSync(
     process.execPath,
-    ["--import", resolve("test/fixtures/accounting-deny.mjs"), ...args],
+    [
+      ...(mutation
+        ? ["--import", resolve("test/fixtures/accounting-mutate.mjs")]
+        : []),
+      "--import",
+      resolve("test/fixtures/accounting-deny.mjs"),
+      ...args,
+    ],
     {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -62,6 +75,7 @@ function execute(args: string[]) {
         HOME: home,
         USERPROFILE: home,
         ACCOUNTING_TEST_ROOT: home,
+        ACCOUNTING_TEST_MUTATION: mutation,
         CODEX_HOME: home,
         CLAUDE_CONFIG_DIR: home,
         PI_CODING_AGENT_DIR: home,
@@ -745,6 +759,284 @@ describe("offline accounting executable", () => {
     },
   );
 
+  it.each([
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+  ] as const)("preserves last usage after a missing %s baseline", (field) => {
+    const prior = codex(counter(100, 20, 10, 3));
+    delete (
+      prior.payload.info.total_token_usage as Partial<
+        ReturnType<typeof counter>
+      >
+    )[field];
+    const next = codex(
+      counter(160, 30, 18, 5),
+      counter(60, 10, 8, 2),
+      "2026-10-07T12:01:00Z",
+    );
+    fixture("sessions/baseline.jsonl", [
+      context,
+      prior,
+      next,
+      next,
+      codex(
+        counter(220, 40, 26, 7),
+        counter(60, 10, 8, 2),
+        "2026-10-07T12:02:00Z",
+      ),
+    ]);
+    const report = run(["--provider", "codex", "--codex-root", home]);
+    expect(report.records).toHaveLength(3);
+    for (const record of report.records.slice(1)) {
+      expect(record.tokens).toEqual({
+        input: 50,
+        cacheRead: 10,
+        output: 8,
+        reasoning: 2,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
+        cacheWriteUnknown: 0,
+      });
+    }
+    expect(report.records[1].warnings).toContain("incomplete_baseline");
+    expect(report.records[2].warnings).toEqual([]);
+    expect(report.sources[0]).toMatchObject({
+      coverage: "partial",
+      replacementSafe: false,
+    });
+    expect(report.sources[0].reasons).toContain("incomplete_baseline");
+  });
+
+  it.each([
+    ["input smaller", counter(150, 46, 23, 5)],
+    ["cache smaller", counter(230, 30, 23, 5)],
+    ["output smaller", counter(230, 46, 15, 5)],
+    ["reasoning smaller", counter(230, 46, 23, 4)],
+    ["input larger", counter(240, 46, 23, 5)],
+    ["cache larger", counter(230, 47, 23, 5)],
+    ["output larger", counter(230, 46, 24, 5)],
+    ["reasoning larger", counter(230, 46, 23, 6)],
+  ])(
+    "retains coherent last usage for a non-replay delta mismatch: %s",
+    (_name, total) => {
+      const last = counter(130, 26, 13, 2);
+      const next = codex(total, last, "2026-10-07T12:01:00Z");
+      fixture("sessions/mismatch.jsonl", [
+        context,
+        codex(counter(100, 20, 10, 3)),
+        next,
+        codex(total, last, "2026-10-07T12:02:00Z"),
+        codex(
+          counter(
+            total.input_tokens + 130,
+            total.cached_input_tokens + 26,
+            total.output_tokens + 13,
+            total.reasoning_output_tokens + 2,
+          ),
+          last,
+          "2026-10-07T12:03:00Z",
+        ),
+      ]);
+      const report = run(["--provider", "codex", "--codex-root", home]);
+      expect(report.records).toHaveLength(3);
+      expect(report.records.slice(1).map((record) => record.tokens)).toEqual([
+        {
+          input: 104,
+          cacheRead: 26,
+          output: 13,
+          reasoning: 2,
+          cacheWrite5m: 0,
+          cacheWrite1h: 0,
+          cacheWriteUnknown: 0,
+        },
+        {
+          input: 104,
+          cacheRead: 26,
+          output: 13,
+          reasoning: 2,
+          cacheWrite5m: 0,
+          cacheWrite1h: 0,
+          cacheWriteUnknown: 0,
+        },
+      ]);
+      expect(report.records[1].warnings).toEqual(["counter_gap"]);
+      expect(report.records[2].warnings).toEqual([]);
+      expect(report.sources[0]).toMatchObject({
+        coverage: "partial",
+        replacementSafe: false,
+        reasons: ["counter_gap"],
+      });
+    },
+  );
+
+  it.each([100, Number.MAX_SAFE_INTEGER])(
+    "keeps conflicting cache lifetimes unknown across later chunks in either order: %s",
+    (amount) => {
+      const chunk = (short: number, long: number) => {
+        const row = claude();
+        row.message.usage.cache_creation_input_tokens = amount;
+        row.message.usage.cache_creation = {
+          ephemeral_5m_input_tokens: short,
+          ephemeral_1h_input_tokens: long,
+        };
+        return row;
+      };
+      for (const rows of [
+        [chunk(amount, 0), chunk(0, amount), chunk(amount, 0)],
+        [chunk(0, amount), chunk(amount, 0), chunk(0, amount)],
+      ]) {
+        fixture("projects/cache.jsonl", rows);
+        const report = run(["--provider", "claude", "--claude-root", home]);
+        expect(report.records).toHaveLength(1);
+        expect(report.records[0].tokens).toEqual({
+          input: 100,
+          cacheRead: 200,
+          output: 10,
+          reasoning: null,
+          cacheWrite5m: null,
+          cacheWrite1h: null,
+          cacheWriteUnknown: null,
+        });
+        expect(report.records[0].warnings).toContain(
+          "conflicting_cache_creation",
+        );
+        expect(report.sources[0]).toMatchObject({
+          coverage: "partial",
+          replacementSafe: false,
+          reasons: ["conflicting_cache_creation"],
+        });
+      }
+      // An unspecified lifetime becoming known is refinement, not conflict.
+      const unspecified = chunk(0, 0);
+      delete (
+        unspecified.message.usage as Partial<typeof unspecified.message.usage>
+      ).cache_creation;
+      for (const rows of [
+        [unspecified, chunk(30, amount - 30)],
+        [chunk(30, amount - 30), unspecified],
+      ]) {
+        fixture("projects/cache.jsonl", rows);
+        const report = run(["--provider", "claude", "--claude-root", home]);
+        expect(report.records[0].tokens).toMatchObject({
+          cacheWrite5m: 30,
+          cacheWrite1h: amount - 30,
+          cacheWriteUnknown: 0,
+        });
+        expect(report.sources[0]).toMatchObject({
+          coverage: "complete",
+          replacementSafe: true,
+        });
+      }
+    },
+  );
+
+  it.each([
+    ["2026-10-07T12:00:00Z", "2026-10-07T12:01:00.123Z", "second"],
+    ["2026-10-07T12:00:00.123Z", "2026-10-07T12:01:00Z", "millisecond"],
+    ["2026-10-07T12:00:00Z", "2026-10-07T12:00:00.000Z", "second"],
+  ])(
+    "keeps timestamp provenance independent of file order: %s / %s",
+    (early, late, precision) => {
+      let first: AccountingResponse | undefined;
+      for (const timestamps of [
+        [early, late],
+        [late, early],
+      ]) {
+        fixture("projects/a.jsonl", [claude(10, timestamps[0])]);
+        fixture("projects/b.jsonl", [claude(10, timestamps[1])]);
+        const report = run(["--provider", "claude", "--claude-root", home]);
+        expect(report.records).toHaveLength(1);
+        expect(report.records[0]).toMatchObject({
+          timestamp: new Date(early).toISOString(),
+          timestampPrecision: precision,
+        });
+        expect(report.sources[0].coverage).toBe("complete");
+        if (first) expect(report.records).toEqual(first.records);
+        first = report;
+      }
+    },
+  );
+
+  it.each(["codex", "claude"])(
+    "rejects invalid event calendars without moving %s usage into another interval",
+    (provider) => {
+      const invalid = [
+        "2026-02-30T12:00:00Z",
+        "2026-02-29T12:00:00.123Z",
+        "2026-02-30T12:00:00+02:00",
+        "2026-02-30T12:00:00-02:00",
+        "2026-04-31T12:00:00Z",
+        "2026-10-07T24:00:00Z",
+      ];
+      const valid = [
+        "2024-02-29T12:00:00Z",
+        "2026-10-07T00:30:00+02:00",
+        "2026-10-07T23:30:00-02:00",
+      ];
+      for (const timestamp of [...invalid, ...valid]) {
+        fixture(
+          `${provider === "codex" ? "sessions" : "projects"}/dates.jsonl`,
+          [
+            provider === "codex"
+              ? codex(counter(100, 20, 10), undefined, timestamp)
+              : claude(10, timestamp),
+          ],
+        );
+        const result = invoke([
+          "accounting",
+          "--from",
+          "2024-01-01T00:00:00Z",
+          "--to",
+          to,
+          "--provider",
+          provider,
+          `--${provider}-root`,
+          home,
+        ]);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).not.toContain(home);
+        expect(result.stdout).not.toContain(sentinel);
+        const report: AccountingResponse = JSON.parse(result.stdout);
+        if (invalid.includes(timestamp)) {
+          expect(report.records).toEqual([]);
+          expect(report.sources[0]).toMatchObject({
+            coverage: "partial",
+            replacementSafe: false,
+            reasons: ["missing_timestamp"],
+            evidence: { first: null, last: null },
+          });
+        } else {
+          const normalized = new Date(timestamp).toISOString();
+          expect(report.records).toHaveLength(1);
+          expect(report.records[0].timestamp).toBe(normalized);
+          expect(report.sources[0]).toMatchObject({
+            coverage: "complete",
+            replacementSafe: true,
+            evidence: { first: normalized, last: normalized },
+          });
+        }
+      }
+      const event = (timestamp: string) =>
+        provider === "codex"
+          ? codex(counter(100, 20, 10), undefined, timestamp)
+          : claude(10, timestamp);
+      fixture(`${provider === "codex" ? "sessions" : "projects"}/dates.jsonl`, [
+        event(time),
+        event("2026-02-30T12:00:00Z"),
+      ]);
+      const replay = run(["--provider", provider, `--${provider}-root`, home]);
+      expect(replay.records).toHaveLength(1);
+      expect(replay.sources[0]).toMatchObject({
+        coverage: "partial",
+        replacementSafe: false,
+        reasons: ["missing_timestamp"],
+        evidence: { first: time, last: time },
+      });
+    },
+  );
+
   it("retains known Codex usage when optional reasoning counters are absent", () => {
     const row = codex(counter(100, 20, 10));
     delete (
@@ -831,6 +1123,121 @@ describe("offline accounting executable", () => {
       const bounded = run([...args, flag, "1"]);
       expect(bounded.sources[0].truncated).toBe(true);
       expect(bounded.sources[0].replacementSafe).toBe(false);
+    }
+  });
+
+  it.each(["append", "rewrite"] as const)(
+    "detects a real %s during a scan",
+    (mutation) => {
+      const path = fixture("projects/mutating.jsonl", [claude(10)]);
+      const original = readFileSync(path, "utf8");
+      const report = run(
+        ["--provider", "claude", "--claude-root", home],
+        mutation,
+      );
+      const changed = readFileSync(path, "utf8");
+      expect(changed).not.toBe(original);
+      expect(changed.length).toBe(
+        mutation === "append" ? original.length * 2 : original.length,
+      );
+      expect(
+        JSON.parse(changed.split("\n")[0]).message.usage.output_tokens,
+      ).toBe(mutation === "append" ? 10 : 20);
+      expect(report.records).toHaveLength(1);
+      expect(report.records[0].tokens.output).toBe(10);
+      expect(report.sources[0]).toMatchObject({
+        coverage: "partial",
+        replacementSafe: false,
+        reasons: ["file_changed"],
+        bytes: Buffer.byteLength(original),
+        truncated: false,
+      });
+    },
+  );
+
+  it.each(["projects/exact.jsonl", "projects/nested/exact.jsonl"])(
+    "processes the final admitted entry: %s",
+    (path) => {
+      fixture(path, [claude()]);
+      const report = run([
+        "--provider",
+        "claude",
+        "--claude-root",
+        home,
+        "--max-entries",
+        path.includes("nested") ? "2" : "1",
+      ]);
+      expect(report.records).toHaveLength(1);
+      expect(report.records[0].tokens.output).toBe(10);
+      expect(report.sources[0]).toMatchObject({
+        coverage: "complete",
+        replacementSafe: true,
+        files: 1,
+        reasons: [],
+        truncated: false,
+      });
+    },
+  );
+
+  it("bounds excess entries across roots while processing admitted work and honoring other budgets", () => {
+    const path = fixture("first/projects/a.jsonl", [claude()]);
+    fixture("first/projects/b.jsonl", [
+      claude(10, time, { requestId: "second" }),
+    ]);
+    fixture("second/projects/c.jsonl", [
+      claude(10, time, { requestId: "third" }),
+    ]);
+    const args = [
+      "--provider",
+      "claude",
+      "--claude-root",
+      join(home, "first"),
+      "--claude-root",
+      join(home, "second"),
+      "--max-entries",
+      "1",
+    ];
+    const report = run(args);
+    expect(report.records).toHaveLength(1);
+    expect(report.sources.map((source) => source.files)).toEqual([1, 0]);
+    for (const source of report.sources)
+      expect(source).toMatchObject({
+        coverage: "partial",
+        replacementSafe: false,
+        truncated: true,
+        reasons: ["entry_limit"],
+      });
+    for (const [flag, value, reason] of [
+      ["--max-files", "1", "file_limit"],
+      ["--max-lines", "1", "line_limit"],
+      [
+        "--max-bytes",
+        String(Buffer.byteLength(readFileSync(path))),
+        "byte_limit",
+      ],
+    ]) {
+      const bounded = run([
+        "--provider",
+        "claude",
+        "--claude-root",
+        join(home, "first"),
+        "--claude-root",
+        join(home, "second"),
+        "--max-entries",
+        "3",
+        flag,
+        value,
+      ]);
+      expect(bounded.records).toHaveLength(1);
+      expect(bounded.sources.map((source) => source.files)).toEqual([1, 0]);
+      expect(
+        bounded.sources.every(
+          (source) => !source.replacementSafe && source.truncated,
+        ),
+      ).toBe(true);
+      expect(
+        bounded.sources.every((source) => source.reasons.includes(reason)),
+      ).toBe(true);
     }
   });
 

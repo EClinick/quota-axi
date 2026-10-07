@@ -84,13 +84,16 @@ These gaps also invalidate cumulative-counter continuity: the next usage observa
 When cumulative totals are present, that observation establishes a fresh baseline for subsequent deltas; source coverage remains partial for the skipped records.
 A repeated cumulative observation contributes source timestamp evidence but no additional token record.
 A first observation counts its `last_token_usage`, with incomplete-baseline evidence when totals disagree or fork metadata is present.
-A counter reset or a delta larger than the last request uses the last request observation and marks partial coverage instead of attributing inherited/gapped totals to one model/tier/time.
+A counter reset or a non-replay delta that disagrees with the last request uses the last request observation and marks partial coverage instead of attributing inherited/gapped totals to one model/tier/time.
+Missing per-category baselines retain independently reported last-request counts with incomplete-baseline evidence.
 Missing token fields remain unknown without discarding independently known categories.
 Codex identity is deliberately source-local, based on session/counter observation metadata (or a file-position fallback), not a claim of globally unique request identity.
 
 Claude assistant chunks with both `requestId` and `message.id` revise a single request/message observation.
-Repeated chunk counters are merged by category maxima, never summed; the earliest chunk timestamp owns interval membership.
+Repeated chunk counters are merged by category maxima, never summed; the earliest chunk timestamp owns interval membership and retains that chunk's precision.
+Equal instants retain the coarser observed precision, independent of file order.
 Separate cache-creation 5-minute and 1-hour fields are preserved.
+Conflicting lifetime breakdowns that exceed the observed creation total remain unknown with partial coverage, including after later chunks.
 When a lifetime breakdown is absent, creation tokens stay in `cacheWriteUnknown`, not an assumed 5-minute rate class.
 The context count includes disjoint input, cache read and cache creation counts.
 Missing request/message IDs use a source-local file-position surrogate, mark partial coverage, and make no cross-file or cross-host deduplication claim.

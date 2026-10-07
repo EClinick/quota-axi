@@ -69,11 +69,9 @@ export async function collectAccounting(
           ? "byte_limit"
           : lines >= options.limits.maxLines
             ? "line_limit"
-            : entries >= options.limits.maxEntries
-              ? "entry_limit"
-              : files >= options.limits.maxFiles
-                ? "file_limit"
-                : null;
+            : files >= options.limits.maxFiles
+              ? "file_limit"
+              : null;
     if (code) reason(current, code, true);
     return code === null;
   };
@@ -120,9 +118,11 @@ export async function collectAccounting(
         records.set(key, merged);
         for (const warning of merged.warnings) {
           if (
-            ["conflicting_metadata", "conflicting_observation"].includes(
-              warning,
-            )
+            [
+              "conflicting_metadata",
+              "conflicting_observation",
+              "conflicting_cache_creation",
+            ].includes(warning)
           )
             reason(current, warning);
         }
@@ -314,6 +314,11 @@ export async function collectAccounting(
           const directory = await opendir(path);
           for await (const entry of directory) {
             if (!withinBudget(current)) break;
+            // Entry admission is separate from processing admitted children.
+            if (entries >= options.limits.maxEntries) {
+              reason(current, "entry_limit", true);
+              break;
+            }
             entries++;
             children.push({
               name: entry.name,

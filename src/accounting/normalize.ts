@@ -21,6 +21,15 @@ function timestamp(value: unknown): string | null {
     !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)
   )
     return null;
+  // Validate local calendar/time components before applying the timezone offset.
+  // Date.parse alone rolls impossible dates (and 24:00) into another day.
+  const local = value.slice(0, 19);
+  const calendar = new Date(`${local}Z`);
+  if (
+    !Number.isFinite(calendar.getTime()) ||
+    calendar.toISOString().slice(0, 19) !== local
+  )
+    return null;
   const ms = Date.parse(value);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
@@ -104,6 +113,7 @@ export class UsageParser {
       return null;
     const time = timestamp(row.timestamp);
     if (time) this.observe(time);
+    else this.warn("missing_timestamp");
     const info = object(payload.info);
     const totals = this.counter(info.total_token_usage);
     const last = this.counter(info.last_token_usage);
@@ -122,10 +132,15 @@ export class UsageParser {
         delta = totals.map((n, i) => difference(n, this.previous![i]));
         if (
           last &&
-          delta.some((n, i) => n !== null && last[i] !== null && n > last[i]!)
+          delta.some((n, i) => n !== null && last[i] !== null && n !== last[i])
         ) {
           delta = last;
           warnings.push("counter_gap");
+        } else if (delta.some((n) => n === null)) {
+          // Comparable categories agree; fill unavailable deltas from the
+          // independent request without discarding other known categories.
+          delta = delta.map((n, i) => n ?? last?.[i] ?? null);
+          warnings.push("incomplete_baseline");
         }
       } else {
         delta = last;
@@ -158,10 +173,7 @@ export class UsageParser {
       warnings.push("missing_tokens");
       this.warn("missing_tokens");
     }
-    if (!time) {
-      this.warn("missing_timestamp");
-      return null;
-    }
+    if (!time) return null;
     const record = this.base(
       time,
       model(info.model) ?? this.currentModel,
@@ -388,20 +400,38 @@ export function mergeRecord(
         : nextTotal === null
           ? previousTotal
           : Math.max(previousTotal, nextTotal);
-    merged.tokens.cacheWriteUnknown = difference(total, classified);
+    const cacheConflict =
+      merged.warnings.includes("conflicting_cache_creation") ||
+      (merged.tokens.cacheWrite5m !== null &&
+        merged.tokens.cacheWrite1h !== null &&
+        (classified === null || (total !== null && classified > total)));
+    if (cacheConflict) {
+      merged.warnings.push("conflicting_cache_creation");
+      merged.tokens.cacheWrite5m = null;
+      merged.tokens.cacheWrite1h = null;
+      merged.tokens.cacheWriteUnknown = null;
+    } else merged.tokens.cacheWriteUnknown = difference(total, classified);
     merged.contextTokens = { status: "unknown", value: null };
     const context = safeSum([
       merged.tokens.input,
       merged.tokens.cacheRead,
-      total,
+      cacheConflict ? null : total,
     ]);
     if (context !== null)
       merged.contextTokens = { status: "known", value: context };
   } else if (JSON.stringify(previous.tokens) !== JSON.stringify(next.tokens)) {
     merged.warnings.push("conflicting_observation");
   }
-  merged.timestamp =
-    previous.timestamp < next.timestamp ? previous.timestamp : next.timestamp;
+  // Equal instants retain the coarser observed precision, independent of order.
+  const earliest =
+    next.timestamp < previous.timestamp ||
+    (next.timestamp === previous.timestamp &&
+      next.timestampPrecision === "second")
+      ? next
+      : previous;
+  merged.timestamp = earliest.timestamp;
+  merged.timestampPrecision = earliest.timestampPrecision;
+  merged.timestampSource = earliest.timestampSource;
   revision(merged);
   return merged;
 }
