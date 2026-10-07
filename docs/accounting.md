@@ -1,7 +1,8 @@
 # Local accounting prototype
 
 This is a local-only, opt-in prototype, not an accepted upstream product expansion or a released feature.
-The existing [VISION](../VISION.md) owns upstream scope; historical token accounting and limited provider coverage need maintainer agreement before upstream submission.
+The existing [VISION](../VISION.md) owns upstream scope; acceptance of historical token accounting and limited provider coverage remains unconfirmed.
+Submission of this prototype proposal is authorized, but does not imply maintainer endorsement, upstream acceptance, merge, or deployment.
 No pricing, billing totals, price downloads, or Dockside consumer are included.
 Dockside can apply one centrally selected catalog to the exported records; API-rate estimates are not subscription invoices.
 
