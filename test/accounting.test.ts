@@ -1,0 +1,419 @@
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  copyFileSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AccountingResponse } from "../src/accounting/types.js";
+
+// Primary owner: the shipped executable, including routing, filesystem scanning,
+// normalization and the wire privacy contract. No parser-only duplicate suite.
+let home: string;
+const from = "2026-10-01T00:00:00Z",
+  to = "2026-11-01T00:00:00Z";
+const time = "2026-10-07T12:00:00.000Z";
+const sentinel = "PRIVATE_PROMPT_PATH_PROJECT_SECRET_SENTINEL";
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), "accounting-"));
+});
+afterEach(() => rmSync(home, { recursive: true, force: true }));
+function fixture(path: string, rows: unknown[], tail = ""): string {
+  const full = join(home, path);
+  mkdirSync(dirname(full), { recursive: true });
+  writeFileSync(
+    full,
+    rows.map((row) => JSON.stringify(row) + "\n").join("") + tail,
+  );
+  return full;
+}
+function run(extra: string[] = [], records = true): AccountingResponse {
+  const result = invoke([
+    "accounting",
+    "--from",
+    from,
+    "--to",
+    to,
+    ...(records ? ["--records"] : []),
+    ...extra,
+  ]);
+  expect(result.status, result.stderr + result.stdout).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(result.stdout).not.toContain(sentinel);
+  expect(result.stdout).not.toContain(home);
+  return JSON.parse(result.stdout);
+}
+function invoke(args: string[]) {
+  return spawnSync(
+    process.execPath,
+    [
+      "--import",
+      resolve("test/fixtures/accounting-deny.mjs"),
+      resolve("dist/bin/quota-axi.js"),
+      ...args,
+    ],
+    {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 8 * 1024 * 1024,
+      env: {
+        PATH: "",
+        HOME: home,
+        USERPROFILE: home,
+        ACCOUNTING_TEST_ROOT: home,
+        CODEX_HOME: home,
+        CLAUDE_CONFIG_DIR: home,
+        PI_CODING_AGENT_DIR: home,
+        XDG_CONFIG_HOME: home,
+        XDG_CACHE_HOME: home,
+        XDG_DATA_HOME: home,
+        OPENAI_API_KEY: sentinel,
+        ANTHROPIC_API_KEY: sentinel,
+      },
+    },
+  );
+}
+function counter(input: number, cache: number, output: number, reasoning = 0) {
+  return {
+    input_tokens: input,
+    cached_input_tokens: cache,
+    output_tokens: output,
+    reasoning_output_tokens: reasoning,
+  };
+}
+function codex(
+  total: ReturnType<typeof counter>,
+  last = total,
+  timestamp = time,
+) {
+  return {
+    type: "event_msg",
+    timestamp,
+    payload: {
+      type: "token_count",
+      info: { total_token_usage: total, last_token_usage: last },
+    },
+  };
+}
+function claude(output = 10, timestamp = time, overrides = {}) {
+  return {
+    type: "assistant",
+    timestamp,
+    requestId: "req_synthetic",
+    sessionId: sentinel,
+    cwd: sentinel,
+    message: {
+      id: "msg_synthetic",
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: sentinel }],
+      usage: {
+        input_tokens: 100,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: 70,
+        cache_creation: {
+          ephemeral_5m_input_tokens: 30,
+          ephemeral_1h_input_tokens: 40,
+        },
+        output_tokens: output,
+        service_tier: "standard",
+      },
+    },
+    ...overrides,
+  };
+}
+const context = {
+  type: "turn_context",
+  payload: { model: "gpt-5-codex", service_tier: "fast", cwd: sentinel },
+};
+const session = {
+  type: "session_meta",
+  payload: { id: "00000000-0000-4000-8000-000000000001", cwd: sentinel },
+};
+
+describe("offline accounting executable", () => {
+  it("normalizes disjoint Codex deltas and Claude chunk revisions without credentials or network; snapshots replay exactly", () => {
+    fixture("auth.json", [{ access_token: sentinel }]);
+    const path = fixture("codex/sessions/2026/rollout.jsonl", [
+      session,
+      context,
+      codex(counter(100, 20, 10, 3)),
+      codex(
+        counter(160, 30, 18, 5),
+        counter(60, 10, 8, 2),
+        "2026-10-07T12:01:00Z",
+      ),
+      codex(counter(160, 30, 18, 5)),
+    ]);
+    mkdirSync(join(home, "codex/archived_sessions"));
+    copyFileSync(path, join(home, "codex/archived_sessions/copied.jsonl"));
+    fixture("claude/projects/private/stream.jsonl", [
+      claude(),
+      claude(15, "2026-10-07T12:01:00Z"),
+      claude(12),
+    ]);
+    fixture("codex/sessions/auth.jsonl", [{ access_token: sentinel }]);
+    const args = [
+      "--codex-root",
+      join(home, "codex"),
+      "--claude-root",
+      join(home, "claude"),
+    ];
+    const first = run(args),
+      second = run(args);
+    expect(first.snapshot).toEqual(second.snapshot);
+    expect(first.records).toEqual(second.records);
+    expect(first.sources.map((s) => s.coverage)).toEqual([
+      "complete",
+      "complete",
+    ]);
+    expect(first.summary).toEqual([
+      {
+        provider: "codex",
+        model: "gpt-5-codex",
+        records: 2,
+        tokens: {
+          input: 130,
+          cacheRead: 30,
+          cacheWrite5m: 0,
+          cacheWrite1h: 0,
+          cacheWriteUnknown: 0,
+          output: 18,
+          reasoning: 5,
+        },
+      },
+      {
+        provider: "claude",
+        model: "claude-sonnet-4-5",
+        records: 1,
+        tokens: {
+          input: 100,
+          cacheRead: 200,
+          cacheWrite5m: 30,
+          cacheWrite1h: 40,
+          cacheWriteUnknown: 0,
+          output: 15,
+          reasoning: null,
+        },
+      },
+    ]);
+    expect(first.records?.map((r) => r.contextTokens.value)).toEqual([
+      100, 370, 60,
+    ]);
+    expect(first.records?.every((r) => r.account.status === "unknown")).toBe(
+      true,
+    );
+    expect(
+      first.records?.find(
+        (r) => r.provider === "codex" && r.tokens.output === 8,
+      )?.timestampPrecision,
+    ).toBe("second");
+    expect(
+      first.records?.find((r) => r.provider === "claude")?.identity.scope,
+    ).toBe("vendor-request");
+    const compact = run(args, false);
+    expect(compact.records).toBeUndefined();
+    expect(compact.snapshot).toEqual(first.snapshot);
+  });
+
+  it("reconstructs counters before interval filtering and exposes gaps, resets and fork baseline uncertainty", () => {
+    fixture("sessions/a.jsonl", [
+      session,
+      context,
+      codex(counter(100, 20, 10), undefined, "2026-09-30T23:59:00Z"),
+      codex(counter(160, 30, 18), counter(60, 10, 8)),
+      codex(counter(300, 60, 40), counter(40, 5, 7), "2026-10-07T12:02:00Z"),
+      codex(counter(10, 2, 2), undefined, "2026-10-07T12:03:00Z"),
+    ]);
+    fixture("archived_sessions/fork.jsonl", [
+      {
+        type: "session_meta",
+        payload: { id: "fork", forked_from_id: "parent" },
+      },
+      context,
+      codex(counter(500, 100, 80), counter(20, 5, 3), "2026-10-07T12:04:00Z"),
+    ]);
+    const report = run(["--provider", "codex", "--codex-root", home]);
+    // Visible input: (60-10) + (40-5) + (10-2) + (20-5) = 108.
+    expect(report.summary[0].tokens).toEqual({
+      input: 108,
+      cacheRead: 22,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheWriteUnknown: 0,
+      output: 20,
+      reasoning: 0,
+    });
+    expect(report.sources[0]).toMatchObject({
+      coverage: "partial",
+      replacementSafe: false,
+      truncated: false,
+    });
+    expect(report.sources[0].reasons).toEqual([
+      "counter_gap",
+      "counter_reset",
+      "incomplete_baseline",
+    ]);
+  });
+
+  it("does not invent missing token categories, tiers, account ownership, or full-line identities", () => {
+    const row = claude(10, time, { requestId: undefined });
+    delete (row.message.usage as Partial<typeof row.message.usage>)
+      .cache_creation;
+    delete (row.message.usage as Partial<typeof row.message.usage>)
+      .service_tier;
+    fixture("projects/private/session.jsonl", [row]);
+    const report = run(["--provider", "claude", "--claude-root", home]);
+    const record = report.records![0];
+    expect(record.tokens).toMatchObject({
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheWriteUnknown: 70,
+    });
+    expect(record.serviceTier).toEqual({ status: "unknown", value: null });
+    expect(record.identity).toMatchObject({
+      scope: "source-local",
+      kind: "file-position",
+    });
+    expect(record.identity.key).not.toBe(
+      createHash("sha256").update(JSON.stringify(row)).digest("hex"),
+    );
+    expect(record.warnings).toContain("unknown_cache_lifetime");
+    expect(report.sources[0].replacementSafe).toBe(false);
+    row.message.usage.input_tokens = -1;
+    fixture("projects/private/session.jsonl", [row]);
+    expect(
+      run(["--provider", "claude", "--claude-root", home]).summary[0].tokens
+        .input,
+    ).toBeNull();
+  });
+
+  it("retains known Codex usage when optional reasoning counters are absent", () => {
+    const row = codex(counter(100, 20, 10));
+    delete (
+      row.payload.info.total_token_usage as Partial<ReturnType<typeof counter>>
+    ).reasoning_output_tokens;
+    fixture("sessions/legacy.jsonl", [context, row]);
+    const report = run(["--provider", "codex", "--codex-root", home]);
+    expect(report.summary[0].tokens).toMatchObject({
+      input: 80,
+      cacheRead: 20,
+      output: 10,
+      reasoning: null,
+    });
+    expect(report.sources[0].coverage).toBe("partial");
+  });
+
+  it("keeps unsupported, missing and unreadable roots distinct from complete empty observations", () => {
+    mkdirSync(join(home, "projects"));
+    const report = run([
+      "--provider",
+      "claude,codex,copilot,cursor",
+      "--claude-root",
+      home,
+    ]);
+    expect(report.sources.map((s) => [s.provider, s.coverage])).toEqual([
+      ["claude", "complete"],
+      ["codex", "error"],
+      ["copilot", "unsupported"],
+      ["cursor", "unsupported"],
+    ]);
+    expect(report.summary).toEqual([]);
+    const missing = run([
+      "--provider",
+      "codex",
+      "--codex-root",
+      join(home, sentinel),
+    ]);
+    expect(missing.sources[0]).toMatchObject({
+      coverage: "error",
+      reasons: ["root_unavailable"],
+    });
+  });
+
+  it("bounds scans, rejects symlinks and incomplete tails, and notices rewritten files without a stale cache", () => {
+    const path = fixture(
+      "projects/a/session.jsonl",
+      [claude()],
+      '{"incomplete":',
+    );
+    symlinkSync(path, join(home, "projects/a/link.jsonl"));
+    const args = ["--provider", "claude", "--claude-root", home];
+    const partial = run(args);
+    expect(partial.sources[0]).toMatchObject({
+      coverage: "partial",
+      replacementSafe: false,
+      reasons: ["incomplete_tail", "symlink_skipped"],
+    });
+    expect(partial.summary[0].tokens.output).toBe(10);
+    fixture("projects/a/session.jsonl", [claude(20)]);
+    const rewritten = run(args);
+    expect(rewritten.snapshot.id).not.toBe(partial.snapshot.id);
+    expect(rewritten.summary[0].tokens.output).toBe(20);
+    for (const [flag, value, reason] of [
+      ["--max-bytes", "10", "byte_limit"],
+      ["--max-line-bytes", "10", "line_byte_limit"],
+      ["--max-depth", "1", "depth_limit"],
+      ["--max-entries", "1", "entry_limit"],
+    ]) {
+      const bounded = run([...args, flag, value]);
+      expect(bounded.sources[0].truncated).toBe(true);
+      expect(bounded.sources[0].reasons).toContain(reason);
+      expect(bounded.sources[0].replacementSafe).toBe(false);
+    }
+    fixture("projects/a/second.jsonl", [
+      claude(5, time, { requestId: "req_second" }),
+      claude(8, time, { requestId: "req_third" }),
+    ]);
+    for (const flag of ["--max-files", "--max-lines"]) {
+      const bounded = run([...args, flag, "1"]);
+      expect(bounded.sources[0].truncated).toBe(true);
+      expect(bounded.sources[0].replacementSafe).toBe(false);
+    }
+  });
+
+  it("recovers after malformed lines, uses UTC boundaries, and never renders raw errors or option values", () => {
+    fixture(
+      "projects/a/session.jsonl",
+      [],
+      `${sentinel}\n${JSON.stringify(claude())}\n${JSON.stringify(claude(99, to, { requestId: "excluded" }))}\n`,
+    );
+    const report = run(["--provider", "claude", "--claude-root", home]);
+    expect(report.summary[0].tokens.output).toBe(10);
+    expect(report.sources[0].reasons).toEqual(["malformed_record"]);
+    for (const option of [
+      "--allow-keychain-prompt",
+      "--allow-claude-inference",
+      "--profile-only",
+      `--${sentinel}`,
+    ]) {
+      const result = invoke(["accounting", option]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).not.toContain(sentinel);
+    }
+    expect(
+      invoke(["accounting", "--from", "2026-02-30T00:00:00Z", "--to", to])
+        .status,
+    ).toBe(2);
+    expect(invoke(["accounting", "--help"]).stdout).toContain(
+      "Local-only prototype",
+    );
+    // A path resembling a legacy command/flag is a value, never help or models.
+    for (const value of ["models", "--help"]) {
+      const result = run([
+        "--provider",
+        "codex",
+        "--codex-root",
+        join(home, value),
+      ]);
+      expect(result.kind).toBe("local-usage-accounting");
+    }
+  });
+});

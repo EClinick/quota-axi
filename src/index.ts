@@ -7,3 +7,9 @@ export {
 } from "./models.js";
 export { SELECTION_SCALAR_KEY } from "./types.js";
 export type * from "./types.js";
+export type {
+  AccountingResponse,
+  AccountingRecord,
+  AccountingSource,
+  AccountingTokens,
+} from "./accounting/types.js";

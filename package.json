@@ -32,7 +32,8 @@
     "dist",
     "skills/quota-axi",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "docs/accounting.md"
   ],
   "publishConfig": {
     "access": "public"

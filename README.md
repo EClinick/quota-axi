@@ -23,6 +23,12 @@ It is data only: it never routes, recommends a provider, model, harness, credent
   The separate `update` command contacts npm only when the user runs it.
 - **Token efficient** - default stdout is compact TOON so agents spend fewer tokens parsing quota state, with `--json` available when a caller needs the normalized model.
 
+## Local accounting prototype
+
+The opt-in `quota-axi accounting` command reads explicitly selected Codex/Claude usage roots and exports normalized token/model evidence with coverage, without credential access, subprocesses, network, or pricing.
+It does not change ordinary quota/auth/models behavior.
+This local-only prototype is not an accepted upstream scope expansion or a released feature; see [the accounting contract](docs/accounting.md) and `quota-axi accounting --help` for source selection, privacy, snapshot replacement, and central-pricing semantics.
+
 ## Quick Start
 
 **Credential-source note:** Claude Code, the Cursor CLI (`cursor-agent`), Copilot CLI, and Muse Code keep live tokens in native secure stores on supported platforms. Linux `cursor-agent` stores its access token in `~/.config/cursor/auth.json` (or the XDG/`$CURSOR_CLI_CONFIG` override); Copilot CLI uses Windows Credential Manager on Windows and the macOS Keychain on macOS; Muse Code on macOS stores the OAuth token in the login Keychain item its `auth.json` `storage: "keychain"` records point to.

@@ -44,6 +44,8 @@ Use it when you need local quota headroom before deciding whether it is safe to 
 provider, when the user asks about usage, rate limits, pace, or remaining quota, or when comparing
 local provider headroom.
 
+The local-only accounting prototype is explicitly opt-in; consult `quota-axi accounting --help` before selecting usage roots.
+
 For current instructions, output shape, and field semantics, run the CLI (no global install required):
 
 - `npx -y quota-axi` - default TOON report

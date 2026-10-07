@@ -1,19 +1,15 @@
 import { runAxiCli } from "axi-sdk-js";
-import {
-  authCommand,
-  modelsCommand,
-  quotaCommand,
-  type QuotaContext,
-} from "./commands.js";
+import type { QuotaContext } from "./commands.js";
 import { PROVIDER_IDS } from "./types.js";
 import { VERSION } from "./version.js";
 
 export const DESCRIPTION =
   "Report local agent-provider quota windows and model quota evidence.";
 
-export const TOP_HELP = `usage: quota-axi [quota|auth|models] [flags]
-commands[3]:
-  (none)=quota, auth, models
+export const TOP_HELP = `usage: quota-axi [quota|auth|models|accounting] [flags]
+commands[4]:
+  (none)=quota, auth, models, accounting
+  accounting --help: opt-in offline local token records (explicit usage roots; no pricing)
 output:
   Default TOON reports local quota evidence. Providers that are not set up are omitted and counted in one help line; --full and an explicit --provider list them. --json keeps every provider and sets notSetUp true on the absent ones. models is a deterministic data join; --sort runway is explicit opt-in ordering. --tui renders a live human terminal report instead (r refreshes, q quits); providers that are not set up fold into one line that a or --all expands.
   Repeated --provider flags accumulate in first-seen order: --provider zai --provider codex equals --provider zai,codex.
@@ -54,6 +50,13 @@ type MainOptions = {
 export async function main(options: MainOptions = {}): Promise<void> {
   const binPath = options.binPath ?? process.argv[1] ?? "quota-axi";
   const argv = normalizeArgv(options.argv ?? process.argv.slice(2));
+  if (argv[0] === "accounting") {
+    const { accountingCommand } = await import("./accounting/command.js");
+    await accountingCommand(argv.slice(1), options.stdout);
+    return;
+  }
+  const { authCommand, modelsCommand, quotaCommand } =
+    await import("./commands.js");
 
   await runAxiCli<QuotaContext>({
     argv,
@@ -87,6 +90,9 @@ export async function main(options: MainOptions = {}): Promise<void> {
 export function normalizeArgv(raw: string[]): string[] {
   if (raw[0] === "--") raw = raw.slice(1);
   if (raw.length === 0) return ["quota"];
+  // Accounting is deliberately command-first and owns all its values and errors.
+  // In particular, a root called --help or models must never alter CLI routing.
+  if (raw[0] === "accounting") return raw;
   if (findLegacyFlag(raw, (arg) => arg === "--help" || arg === "-h") >= 0) {
     return ["--help"];
   }

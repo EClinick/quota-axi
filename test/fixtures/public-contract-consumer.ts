@@ -1,6 +1,7 @@
 import {
   compareModelsByRunway,
   SELECTION_SCALAR_KEY,
+  type AccountingResponse,
   type EffectiveAvailability,
   type ModelQuotaRecord,
   type ModelsResponse,
@@ -54,6 +55,11 @@ const demoted: Array<string | undefined> = [
   quota.providers[0]?.quotaSemantics?.description,
 ];
 
+// The accounting protocol is a distinct exported machine contract.
+function observedOutput(report: AccountingResponse): number | null {
+  return report.records?.[0]?.tokens.output ?? null;
+}
+void observedOutput;
 void models;
 void profileOnlyOptions;
 void spendPriority;
