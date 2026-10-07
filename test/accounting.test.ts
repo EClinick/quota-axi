@@ -133,6 +133,96 @@ const session = {
 
 describe("offline accounting executable", () => {
   it.each([
+    "auth.json",
+    ".credentials.json",
+    "credentials.json",
+    "config.json",
+    "settings.json",
+    "auth.jsonl",
+  ])("denies synthetic credential reads: %s", (name) => {
+    const target = fixture(name, [{ synthetic_secret: sentinel }]);
+    for (const operation of [
+      "fs.closeSync(fs.openSync(target, 'r'))",
+      "fs.open(target, 'r', (error, fd) => { if (error) throw error; fs.closeSync(fd); })",
+      "await (await fs.promises.open(target, 'r')).close()",
+      "fs.readFileSync(target, 'utf8')",
+      "fs.readFile(target, 'utf8', (error) => { if (error) throw error; })",
+      "await fs.promises.readFile(target, 'utf8')",
+      "for await (const chunk of fs.createReadStream(target)) void chunk",
+    ]) {
+      const result = execute([
+        "--input-type=module",
+        "-e",
+        `
+          import fs from "node:fs";
+          const target = ${JSON.stringify(target)};
+          ${operation};
+          process.stdout.write("BOUNDARY_BYPASSED");
+        `,
+      ]);
+      expect(result.status, `${operation}: ${result.stderr}`).toBe(91);
+      expect(result.stderr).toBe("ACCOUNTING_FORBIDDEN_IO\n");
+      expect(result.stdout).toBe("");
+    }
+  });
+
+  it("denies an unselected nonexistent path before filesystem access", () => {
+    const result = execute([
+      "--input-type=module",
+      "-e",
+      `
+        import fs from "node:fs";
+        fs.readFileSync(${JSON.stringify(`${home}-unselected/never-created.txt`)});
+        process.stdout.write("BOUNDARY_BYPASSED");
+      `,
+    ]);
+    expect(result.status, result.stderr).toBe(91);
+    expect(result.stderr).toBe("ACCOUNTING_FORBIDDEN_IO\n");
+    expect(result.stdout).toBe("");
+  });
+
+  it.each([
+    "childProcess.spawn(null)",
+    "childProcess.spawnSync(null)",
+    "childProcess.exec(null)",
+    "childProcess.execSync(null)",
+    "childProcess.execFile(null)",
+    "childProcess.execFileSync(null)",
+    "childProcess.fork(null)",
+    "http.request('data:text/plain,inert')",
+    "http.get('data:text/plain,inert')",
+    "https.request('data:text/plain,inert')",
+    "https.get('data:text/plain,inert')",
+    "net.connect({ host: '127.0.0.1', port: -1 })",
+    "net.createConnection({ host: '127.0.0.1', port: -1 })",
+    "new net.Socket().connect({ host: '127.0.0.1', port: -1 })",
+    "tls.connect({ host: '127.0.0.1', port: -1 })",
+    "dgram.createSocket('invalid-socket-type')",
+    "dns.lookup('127.0.0.1', () => {})",
+    "dns.resolve('127.0.0.1', 'INVALID_RECORD_TYPE', () => {})",
+    "await fetch('data:text/plain,inert')",
+  ])("denies inert process and network attempts: %s", (operation) => {
+    const result = execute([
+      "--input-type=module",
+      "-e",
+      `
+        import childProcess from "node:child_process";
+        import http from "node:http";
+        import https from "node:https";
+        import net from "node:net";
+        import tls from "node:tls";
+        import dgram from "node:dgram";
+        import dns from "node:dns";
+        ${operation};
+        process.stdout.write("BOUNDARY_BYPASSED");
+      `,
+    ]);
+    expect(result.status, result.stderr).toBe(91);
+    expect(result.stderr).toBe("ACCOUNTING_FORBIDDEN_IO\n");
+    expect(result.stdout).toBe("");
+  });
+
+  it.each([
     "fs.closeSync(fs.openSync(target, flags))",
     "fs.open(target, flags, (error, fd) => { if (error) throw error; fs.closeSync(fd); })",
     "await (await fs.promises.open(target, flags)).close()",
