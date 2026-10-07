@@ -80,7 +80,8 @@ Output is separate, and `reasoning` is an informational subset of output, never 
 Codex `event_msg/token_count` cumulative totals are differenced, not summed.
 `turn_context` supplies model and service tier; context size comes from the last request's input count, not `model_context_window` (a capacity ceiling).
 Malformed or oversized skipped records invalidate inherited model and service tier until a fresh intact context supplies them; inline evidence applies only to its own token observation.
-Independently observed token counters remain usable, with partial source coverage for the skipped records.
+These gaps also invalidate cumulative-counter continuity: the next usage observation retains its independently reported last usage without subtraction or replay suppression against pre-gap totals.
+When cumulative totals are present, that observation establishes a fresh baseline for subsequent deltas; source coverage remains partial for the skipped records.
 A repeated cumulative observation contributes source timestamp evidence but no additional token record.
 A first observation counts its `last_token_usage`, with incomplete-baseline evidence when totals disagree or fork metadata is present.
 A counter reset or a delta larger than the last request uses the last request observation and marks partial coverage instead of attributing inherited/gapped totals to one model/tier/time.

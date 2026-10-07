@@ -629,17 +629,15 @@ describe("offline accounting executable", () => {
       truncated: true,
     })),
   ])(
-    "invalidates inherited Codex metadata after $name",
+    "invalidates Codex metadata and counter continuity after $name",
     ({ gap, reason, truncated }) => {
       const event = (
         index: number,
+        total: ReturnType<typeof counter>,
+        last = total,
         metadata: { model?: string; service_tier?: string } = {},
       ) => {
-        const row = codex(
-          counter(index * 100, index * 20, index * 10),
-          counter(100, 20, 10),
-          `2026-10-07T12:0${index}:00Z`,
-        );
+        const row = codex(total, last, `2026-10-07T12:0${index}:00Z`);
         return {
           ...row,
           payload: {
@@ -648,26 +646,38 @@ describe("offline accounting executable", () => {
           },
         };
       };
-      const prefix = [session, context, event(1)]
-        .map((row) => JSON.stringify(row) + "\n")
-        .join("");
-      const suffix = [
-        event(2),
-        event(3, { model: "gpt-5.1-codex" }),
-        event(4, { service_tier: "flex" }),
-        event(5, { model: "gpt-5.1-codex", service_tier: "flex" }),
-        event(6),
+      const rows = [
+        session,
+        context,
+        event(1, counter(100, 20, 10, 4)),
+        gap,
+        event(2, counter(150, 30, 15, 6), counter(130, 26, 13, 5)),
+        gap,
+        event(3, counter(150, 30, 15, 6), counter(60, 12, 6, 2), {
+          model: "gpt-5.1-codex",
+        }),
+        event(4, counter(250, 50, 25, 10), counter(100, 20, 10, 4), {
+          service_tier: "flex",
+        }),
+        event(5, counter(350, 70, 35, 14), counter(100, 20, 10, 4), {
+          model: "gpt-5.1-codex",
+          service_tier: "flex",
+        }),
+        event(6, counter(450, 90, 45, 18), counter(100, 20, 10, 4)),
         {
           type: "turn_context",
           payload: { model: "gpt-5.2-codex", service_tier: "priority" },
         },
-        event(7),
-      ]
-        .map((row) => JSON.stringify(row) + "\n")
-        .join("");
+        event(7, counter(550, 110, 55, 22), counter(100, 20, 10, 4)),
+      ];
       writeFileSync(
         fixture("sessions/gaps.jsonl", []),
-        Buffer.concat([Buffer.from(prefix), gap, Buffer.from("\n" + suffix)]),
+        Buffer.concat(
+          rows.flatMap((row) => [
+            Buffer.isBuffer(row) ? row : Buffer.from(JSON.stringify(row)),
+            Buffer.from("\n"),
+          ]),
+        ),
       );
       const report = run([
         "--provider",
@@ -692,22 +702,35 @@ describe("offline accounting executable", () => {
         [null, "unknown", null],
         ["gpt-5.2-codex", "known", "priority"],
       ]);
+      expect(
+        report.records.map((record) => [
+          record.tokens.input,
+          record.tokens.cacheRead,
+          record.tokens.output,
+          record.tokens.reasoning,
+          record.contextTokens.value,
+        ]),
+      ).toEqual([
+        [80, 20, 10, 4, 100],
+        [104, 26, 13, 5, 130],
+        [48, 12, 6, 2, 60],
+        [80, 20, 10, 4, 100],
+        [80, 20, 10, 4, 100],
+        [80, 20, 10, 4, 100],
+        [80, 20, 10, 4, 100],
+      ]);
       for (const record of report.records) {
-        expect(record.tokens).toEqual({
-          input: 80,
-          cacheRead: 20,
+        expect(record.tokens).toMatchObject({
           cacheWrite5m: 0,
           cacheWrite1h: 0,
           cacheWriteUnknown: 0,
-          output: 10,
-          reasoning: 0,
         });
-        expect(record.contextTokens).toEqual({ status: "known", value: 100 });
+        expect(record.contextTokens.status).toBe("known");
       }
       expect(report.records.map((record) => record.warnings)).toEqual([
         [],
-        ["unknown_model", "unknown_service_tier"],
-        ["unknown_service_tier"],
+        ["incomplete_baseline", "unknown_model", "unknown_service_tier"],
+        ["incomplete_baseline", "unknown_service_tier"],
         ["unknown_model"],
         [],
         ["unknown_model", "unknown_service_tier"],
@@ -716,7 +739,7 @@ describe("offline accounting executable", () => {
       expect(report.sources[0]).toMatchObject({
         coverage: "partial",
         replacementSafe: false,
-        reasons: [reason],
+        reasons: ["incomplete_baseline", reason].sort(),
         truncated,
       });
     },

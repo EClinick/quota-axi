@@ -79,6 +79,7 @@ export class UsageParser {
   ) {}
 
   gap(): void {
+    this.previous = null;
     this.currentModel = null;
     this.currentTier = null;
   }
