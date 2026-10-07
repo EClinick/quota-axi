@@ -324,14 +324,31 @@ export function mergeRecord(
     tokens: { ...previous.tokens },
     warnings: [...previous.warnings, ...next.warnings],
   };
-  if (
-    previous.model !== next.model ||
-    previous.serviceTier.value !== next.serviceTier.value
-  ) {
-    merged.model = null;
-    merged.serviceTier = { status: "unknown", value: null };
-    merged.warnings.push("conflicting_metadata");
-  }
+  const mergeEvidence = (
+    a: string | null,
+    b: string | null,
+    field: "model" | "service_tier",
+  ): string | null => {
+    const conflict = `conflicting_${field}`;
+    if (
+      merged.warnings.includes(conflict) ||
+      (a !== null && b !== null && a !== b)
+    ) {
+      merged.warnings.push(conflict, "conflicting_metadata");
+      return null;
+    }
+    return a ?? b;
+  };
+  merged.model = mergeEvidence(previous.model, next.model, "model");
+  const serviceTier = mergeEvidence(
+    previous.serviceTier.value,
+    next.serviceTier.value,
+    "service_tier",
+  );
+  merged.serviceTier = {
+    status: serviceTier === null ? "unknown" : "known",
+    value: serviceTier,
+  };
   if (
     previous.provider === "claude" &&
     previous.identity.scope === "vendor-request"

@@ -268,6 +268,129 @@ describe("offline accounting executable", () => {
     expect(
       first.records.find((r) => r.provider === "claude")?.identity.scope,
     ).toBe("vendor-request");
+    expect(first.records.map((r) => [r.model, r.serviceTier])).toEqual([
+      ["gpt-5-codex", { status: "known", value: "fast" }],
+      ["claude-sonnet-4-5", { status: "known", value: "standard" }],
+      ["gpt-5-codex", { status: "known", value: "fast" }],
+    ]);
+    for (const { models, tiers, expectedModel, expectedTier, conflicts } of [
+      {
+        models: ["claude-sonnet-4-5", "claude-sonnet-4-5", "claude-sonnet-4-5"],
+        tiers: [null, "standard", null],
+        expectedModel: "claude-sonnet-4-5",
+        expectedTier: "standard",
+        conflicts: [],
+      },
+      {
+        models: [null, "claude-sonnet-4-5", null],
+        tiers: ["standard", "standard", "standard"],
+        expectedModel: "claude-sonnet-4-5",
+        expectedTier: "standard",
+        conflicts: [],
+      },
+      {
+        models: ["claude-sonnet-4-5", null, null],
+        tiers: ["standard", null, null],
+        expectedModel: "claude-sonnet-4-5",
+        expectedTier: "standard",
+        conflicts: [],
+      },
+      {
+        models: [null, null, null],
+        tiers: [null, null, null],
+        expectedModel: null,
+        expectedTier: null,
+        conflicts: [],
+      },
+      {
+        models: ["claude-sonnet-4-5", "claude-opus-4-5", "claude-sonnet-4-5"],
+        tiers: ["standard", "standard", "standard"],
+        expectedModel: null,
+        expectedTier: "standard",
+        conflicts: ["conflicting_model"],
+      },
+      {
+        models: ["claude-sonnet-4-5", "claude-sonnet-4-5", "claude-sonnet-4-5"],
+        tiers: ["standard", "priority", "standard"],
+        expectedModel: "claude-sonnet-4-5",
+        expectedTier: null,
+        conflicts: ["conflicting_service_tier"],
+      },
+      {
+        models: ["claude-sonnet-4-5", "claude-opus-4-5", "claude-sonnet-4-5"],
+        tiers: [null, null, "standard"],
+        expectedModel: null,
+        expectedTier: "standard",
+        conflicts: ["conflicting_model"],
+      },
+      {
+        models: [null, null, "claude-sonnet-4-5"],
+        tiers: ["standard", "priority", "standard"],
+        expectedModel: "claude-sonnet-4-5",
+        expectedTier: null,
+        conflicts: ["conflicting_service_tier"],
+      },
+      {
+        models: ["claude-sonnet-4-5", "claude-opus-4-5", null],
+        tiers: ["standard", "priority", null],
+        expectedModel: null,
+        expectedTier: null,
+        conflicts: ["conflicting_model", "conflicting_service_tier"],
+      },
+    ]) {
+      fixture(
+        "claude/projects/private/stream.jsonl",
+        [
+          claude(),
+          claude(15, "2026-10-07T12:01:00Z"),
+          claude(12, "2026-10-07T12:03:00Z"),
+        ].map((row, index) => ({
+          ...row,
+          message: {
+            ...row.message,
+            model: models[index] ?? undefined,
+            usage: {
+              ...row.message.usage,
+              service_tier: tiers[index] ?? undefined,
+            },
+          },
+        })),
+      );
+      const report = run([
+        "--provider",
+        "claude",
+        "--claude-root",
+        join(home, "claude"),
+      ]);
+      expect(report.records).toHaveLength(1);
+      expect(report.records[0]).toMatchObject({
+        model: expectedModel,
+        serviceTier: {
+          status: expectedTier === null ? "unknown" : "known",
+          value: expectedTier,
+        },
+        timestamp: time,
+        tokens: {
+          input: 100,
+          cacheRead: 200,
+          cacheWrite5m: 30,
+          cacheWrite1h: 40,
+          cacheWriteUnknown: 0,
+          output: 15,
+          reasoning: null,
+        },
+      });
+      expect(
+        report.records[0].warnings.filter((warning) =>
+          warning.startsWith("conflicting_"),
+        ),
+      ).toEqual(conflicts.length ? ["conflicting_metadata", ...conflicts] : []);
+      expect(report.sources[0]).toMatchObject({
+        coverage: conflicts.length ? "partial" : "complete",
+        replacementSafe: !conflicts.length,
+        reasons: conflicts.length ? ["conflicting_metadata"] : [],
+      });
+    }
   });
 
   it("exports per-source revisions while earliest chunks own interval membership", () => {

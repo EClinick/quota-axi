@@ -97,6 +97,8 @@ Per-source exported records retain those copies; cross-source reconciliation and
 Consumers must reconcile revisions by identity, retain all observing-source provenance, and mark execution attribution shared/unknown rather than summing per-machine totals.
 Matching token counts, current accounts, local row IDs, or source digests do not prove cross-host duplication.
 Missing model, tier and context evidence is explicitly unknown, never an assumed standard price.
+Repeated observations merge model and service-tier evidence independently; missing values do not erase known values.
+Contradictory known values leave only the affected field unknown, with a field-specific conflict warning and partial source coverage; later observations cannot clear that conflict.
 The collector exports facts for central pricing and no locally estimated dollars.
 
 ## Privacy and validation boundary
