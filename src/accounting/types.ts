@@ -62,13 +62,7 @@ export interface AccountingResponse {
   };
   limits: AccountingLimits;
   sources: AccountingSource[];
-  summary: {
-    provider: "codex" | "claude";
-    model: string | null;
-    records: number;
-    tokens: AccountingTokens;
-  }[];
-  records?: AccountingRecord[];
+  records: AccountingRecord[];
 }
 
 export interface AccountingLimits {
@@ -86,6 +80,5 @@ export interface AccountingOptions {
   roots: { provider: "codex" | "claude"; path: string }[];
   from: string;
   to: string;
-  records: boolean;
   limits: AccountingLimits;
 }

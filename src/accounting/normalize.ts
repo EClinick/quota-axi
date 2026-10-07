@@ -75,6 +75,7 @@ export class UsageParser {
     private sourceId: string,
     private fileId: string,
     private warn: (reason: string) => void,
+    private observe: (time: string) => void,
   ) {}
 
   parse(raw: unknown, line: number): AccountingRecord | null {
@@ -95,6 +96,8 @@ export class UsageParser {
       !payload.info
     )
       return null;
+    const time = timestamp(row.timestamp);
+    if (time) this.observe(time);
     const info = object(payload.info);
     const totals = this.counter(info.total_token_usage);
     const last = this.counter(info.last_token_usage);
@@ -149,7 +152,6 @@ export class UsageParser {
       warnings.push("missing_tokens");
       this.warn("missing_tokens");
     }
-    const time = timestamp(row.timestamp);
     if (!time) {
       this.warn("missing_timestamp");
       return null;
@@ -242,13 +244,14 @@ export class UsageParser {
 
   private claude(row: ObjectValue, line: number): AccountingRecord | null {
     if (row.type !== "assistant") return null;
+    const time = timestamp(row.timestamp);
+    if (time) this.observe(time);
     const message = object(row.message);
     const usage = object(message.usage);
     if (!Object.keys(usage).length) {
       this.warn("missing_tokens");
       return null;
     }
-    const time = timestamp(row.timestamp);
     if (!time) {
       this.warn("missing_timestamp");
       return null;

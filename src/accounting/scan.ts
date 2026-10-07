@@ -8,7 +8,6 @@ import type {
   AccountingRecord,
   AccountingResponse,
   AccountingSource,
-  AccountingTokens,
 } from "./types.js";
 
 function concatenate(a: Uint8Array, b: Uint8Array): Uint8Array {
@@ -176,6 +175,13 @@ export async function collectAccounting(
             id,
             digest([id, relative(canonical, actual)]),
             (code) => reason(current, code),
+            (time) => {
+              const evidence = current.evidence;
+              if (evidence.first === null || time < evidence.first)
+                evidence.first = time;
+              if (evidence.last === null || time > evidence.last)
+                evidence.last = time;
+            },
           );
           const buffer = new Uint8Array(
             Math.min(65536, options.limits.maxBytes),
@@ -369,46 +375,6 @@ export async function collectAccounting(
         a.sourceId.localeCompare(b.sourceId) ||
         a.identity.key.localeCompare(b.identity.key),
     );
-  for (const current of sources) {
-    const times = selected
-      .filter((record) => record.sourceId === current.sourceId)
-      .map((record) => record.timestamp);
-    current.evidence = { first: times[0] ?? null, last: times.at(-1) ?? null };
-  }
-  const summary = new Map<string, AccountingResponse["summary"][number]>();
-  // Vendor request IDs deduplicate across selected sources, but never invent an execution host.
-  const unique = new Map<string, AccountingRecord>();
-  for (const record of selected) {
-    const key =
-      record.identity.scope === "vendor-request"
-        ? record.identity.key
-        : `${record.sourceId}:${record.identity.key}`;
-    const prior = unique.get(key);
-    unique.set(key, prior ? mergeRecord(prior, record) : record);
-  }
-  for (const record of unique.values()) {
-    const key = JSON.stringify([record.provider, record.model]);
-    const group = summary.get(key);
-    if (!group)
-      summary.set(key, {
-        provider: record.provider,
-        model: record.model,
-        records: 1,
-        tokens: { ...record.tokens },
-      });
-    else {
-      group.records++;
-      for (const category of Object.keys(
-        group.tokens,
-      ) as (keyof AccountingTokens)[]) {
-        const a = group.tokens[category],
-          b = record.tokens[category];
-        const sum = a === null || b === null ? null : a + b;
-        group.tokens[category] =
-          sum !== null && Number.isSafeInteger(sum) ? sum : null;
-      }
-    }
-  }
   return {
     schemaVersion: 1,
     parserVersion: "1",
@@ -425,12 +391,6 @@ export async function collectAccounting(
     },
     limits: options.limits,
     sources,
-    summary: [...summary.values()].sort(
-      (a, b) =>
-        options.providers.indexOf(a.provider) -
-          options.providers.indexOf(b.provider) ||
-        (a.model ?? "").localeCompare(b.model ?? ""),
-    ),
-    ...(options.records ? { records: selected } : {}),
+    records: selected,
   };
 }

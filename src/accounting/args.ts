@@ -2,12 +2,11 @@ import { PROVIDER_IDS, type ProviderId } from "../types.js";
 import type { AccountingOptions } from "./types.js";
 
 export const ACCOUNTING_HELP = `usage: quota-axi accounting --from <UTC ISO> --to <UTC ISO> [flags]
-Local-only prototype: normalized token facts, not prices or invoices.
+Local-only prototype: normalized records with coverage, not prices or invoices.
 flags:
   --codex-root <profile directory>   Read sessions/ and archived_sessions/ only (repeatable)
   --claude-root <profile directory>  Read projects/ only (repeatable)
   --provider <ids>                   Default: codex,claude; others report unsupported
-  --records                         Include normalized records for central pricing
   --json                            JSON is the only accounting format
   --max-files <1-10000>              Default 2000
   --max-bytes <1-1073741824>          Default 268435456 (aggregate)
@@ -53,7 +52,6 @@ export function parseAccountingArgs(args: string[]): AccountingOptions {
     roots: [],
     from: "",
     to: "",
-    records: false,
     limits: Object.fromEntries(
       Object.values(limits).map(([key, value]) => [key, value]),
     ) as unknown as AccountingOptions["limits"],
@@ -61,9 +59,8 @@ export function parseAccountingArgs(args: string[]): AccountingOptions {
   const seen = new Set<string>();
   for (let i = 0; i < args.length; i++) {
     const [flag, ...inline] = args[i].split("=");
-    if (flag === "--json" || flag === "--records") {
+    if (flag === "--json") {
       if (inline.length) throw new Error("invalid accounting boolean flag");
-      if (flag === "--records") options.records = true;
       continue;
     }
     const name = flag.slice(2);

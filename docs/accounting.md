@@ -12,7 +12,7 @@ node dist/bin/quota-axi.js accounting \
   --from 2026-10-01T00:00:00Z --to 2026-11-01T00:00:00Z \
   --codex-root /explicit/codex-profile \
   --claude-root /explicit/claude-profile \
-  --records --json
+  --json
 ```
 
 `accounting` must be the first command argument.
@@ -29,7 +29,7 @@ This prototype does not implement Copilot database/WAL or trace accounting, Curs
 The command requires an explicit UTC interval, inclusive at `from` and exclusive at `to`.
 It reconstructs counter baselines before filtering events, including older files/lines, rather than assuming that a filename's date identifies the accounting period.
 The consumer owns timezone/calendar grouping.
-`--records` is required to export individual normalized observations; without it the response includes coverage and model-grouped token summaries only.
+Every response exports individual normalized records with source coverage; aggregation and pricing belong to the consumer.
 JSON is the sole format; quota/auth/models flags, credential consent, inference, refresh, TUI, and cache flags are rejected.
 An argument error exits 2, an unexpected collection failure exits 1, and a successfully serialized report exits 0 even when a source reports an error or partial coverage.
 Consumers must inspect source coverage, not just the process exit status.
@@ -40,7 +40,8 @@ The package exports `AccountingResponse`, `AccountingSource`, `AccountingRecord`
 Accounting has its own `kind: local-usage-accounting`, `schemaVersion: 1`, and `parserVersion: "1"`; it does not reuse quota/auth/models schemas.
 Collection start/end are wall-clock evidence timestamps, not event timestamps.
 Records carry UTC event timestamps, event precision/source, provider, model, source identity, event identity, revision, token categories, context, service tier, and structured warnings.
-Each source also reports the first/last observed event in the interval.
+Each source also reports the first/last observed usage-event timestamps across the scanned files, before deduplication and interval filtering.
+These evidence bounds include repeated counters and chunks and may fall outside the requested interval; record interval ownership is unchanged.
 No hostname or transport machine identity is supplied: the consumer already owns that association.
 
 `sourceId` is a one-way digest of provider plus canonical selected root, stable only while that local root identity remains stable.
@@ -54,7 +55,6 @@ Unchanged same-source reads are idempotent; the collector has no persistent cach
 Replace a prior **complete source and interval** atomically, keyed by parser/schema version, source ID and interval; never add a poll's totals to a prior poll.
 A partial/error/unsupported source cannot delete previously retained records, prove zero usage, or authorize complete replacement.
 Retained consumer records require their own stale/coverage labeling.
-Compact summaries alone cannot implement record-level partial merging.
 
 Coverage means coverage of selected local files, not proof of full vendor, subscription, account, or machine history.
 
@@ -73,13 +73,12 @@ Use stable local exports when an atomic input snapshot is required.
 ## Token and identity semantics
 
 All token values are nonnegative safe integers or `null` (unknown); invalid/missing values are never silently zeroed.
-Summary categories propagate unknown values and numeric overflow as `null`.
 Input is disjoint from cache reads and writes.
 Output is separate, and `reasoning` is an informational subset of output, never an extra billable category to add again.
 
 Codex `event_msg/token_count` cumulative totals are differenced, not summed.
 `turn_context` supplies model and service tier; context size comes from the last request's input count, not `model_context_window` (a capacity ceiling).
-A repeated cumulative observation is ignored.
+A repeated cumulative observation contributes source timestamp evidence but no additional token record.
 A first observation counts its `last_token_usage`, with incomplete-baseline evidence when totals disagree or fork metadata is present.
 A counter reset or a delta larger than the last request uses the last request observation and marks partial coverage instead of attributing inherited/gapped totals to one model/tier/time.
 Missing token fields remain unknown without discarding independently known categories.
@@ -94,7 +93,7 @@ Missing request/message IDs use a source-local file-position surrogate, mark par
 No legacy full-line hash is retained or exported.
 
 A Claude vendor request/message identity can identify copied observations across sources, but does not identify where execution happened.
-Per-source exported records retain those copies; the summary deduplicates proven vendor-request identities across selected sources.
+Per-source exported records retain those copies; cross-source reconciliation and aggregation belong to the consumer.
 Consumers must reconcile revisions by identity, retain all observing-source provenance, and mark execution attribution shared/unknown rather than summing per-machine totals.
 Matching token counts, current accounts, local row IDs, or source digests do not prove cross-host duplication.
 Missing model, tier and context evidence is explicitly unknown, never an assumed standard price.

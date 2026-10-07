@@ -36,6 +36,20 @@ function guard(value) {
   )
     deny();
 }
+function guardOpenFlags(flags = "r") {
+  if (typeof flags === "string") {
+    if (!["r", "rs", "sr"].includes(flags)) deny();
+  } else if (
+    typeof flags !== "number" ||
+    flags &
+      (fs.constants.O_WRONLY |
+        fs.constants.O_RDWR |
+        fs.constants.O_CREAT |
+        fs.constants.O_TRUNC |
+        fs.constants.O_APPEND)
+  )
+    deny();
+}
 for (const owner of [fs, fs.promises]) {
   for (const name of [
     "open",
@@ -51,6 +65,10 @@ for (const owner of [fs, fs.promises]) {
     const original = owner[name];
     owner[name] = function (value, ...args) {
       guard(value);
+      if (name === "open" || name === "openSync") guardOpenFlags(args[0]);
+      else if (name === "createReadStream") guardOpenFlags(args[0]?.flags);
+      else if (name === "readFile" || name === "readFileSync")
+        guardOpenFlags(args[0]?.flag);
       return original.call(this, value, ...args);
     };
   }

@@ -57,7 +57,7 @@ const demoted: Array<string | undefined> = [
 
 // The accounting protocol is a distinct exported machine contract.
 function observedOutput(report: AccountingResponse): number | null {
-  return report.records?.[0]?.tokens.output ?? null;
+  return report.records[0]?.tokens.output ?? null;
 }
 void observedOutput;
 void models;

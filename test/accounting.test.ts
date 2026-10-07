@@ -7,6 +7,10 @@ import {
   writeFileSync,
   copyFileSync,
   symlinkSync,
+  constants,
+  existsSync,
+  readFileSync,
+  realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,7 +25,7 @@ const from = "2026-10-01T00:00:00Z",
 const time = "2026-10-07T12:00:00.000Z";
 const sentinel = "PRIVATE_PROMPT_PATH_PROJECT_SECRET_SENTINEL";
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "accounting-"));
+  home = realpathSync(mkdtempSync(join(tmpdir(), "accounting-")));
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 function fixture(path: string, rows: unknown[], tail = ""): string {
@@ -33,16 +37,8 @@ function fixture(path: string, rows: unknown[], tail = ""): string {
   );
   return full;
 }
-function run(extra: string[] = [], records = true): AccountingResponse {
-  const result = invoke([
-    "accounting",
-    "--from",
-    from,
-    "--to",
-    to,
-    ...(records ? ["--records"] : []),
-    ...extra,
-  ]);
+function run(extra: string[] = []): AccountingResponse {
+  const result = invoke(["accounting", "--from", from, "--to", to, ...extra]);
   expect(result.status, result.stderr + result.stdout).toBe(0);
   expect(result.stderr).toBe("");
   expect(result.stdout).not.toContain(sentinel);
@@ -50,14 +46,12 @@ function run(extra: string[] = [], records = true): AccountingResponse {
   return JSON.parse(result.stdout);
 }
 function invoke(args: string[]) {
+  return execute([resolve("dist/bin/quota-axi.js"), ...args]);
+}
+function execute(args: string[]) {
   return spawnSync(
     process.execPath,
-    [
-      "--import",
-      resolve("test/fixtures/accounting-deny.mjs"),
-      resolve("dist/bin/quota-axi.js"),
-      ...args,
-    ],
+    ["--import", resolve("test/fixtures/accounting-deny.mjs"), ...args],
     {
       cwd: process.cwd(),
       encoding: "utf8",
@@ -138,6 +132,60 @@ const session = {
 };
 
 describe("offline accounting executable", () => {
+  it.each([
+    "fs.closeSync(fs.openSync(target, flags))",
+    "fs.open(target, flags, (error, fd) => { if (error) throw error; fs.closeSync(fd); })",
+    "await (await fs.promises.open(target, flags)).close()",
+    "fs.readFileSync(target, { flag: flags })",
+    "fs.readFile(target, { flag: flags }, (error) => { if (error) throw error; })",
+    "await fs.promises.readFile(target, { flag: flags })",
+    "for await (const chunk of fs.createReadStream(target, { flags })) void chunk",
+  ])("denies write-capable flags before file mutation: %s", (call) => {
+    const existing = fixture("existing.txt", ["preserve"]);
+    const original = readFileSync(existing, "utf8");
+    const absent = join(home, "absent.txt");
+    for (const flags of ["r", "rs", "sr", constants.O_RDONLY]) {
+      const result = execute([
+        "--input-type=module",
+        "-e",
+        `
+          import fs from "node:fs";
+          const target = ${JSON.stringify(existing)}, flags = ${JSON.stringify(flags)};
+          ${call};
+          process.stdout.write(fs.readFileSync(target, "utf8"));
+        `,
+      ]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(original);
+    }
+    for (const flags of [
+      "w",
+      "a",
+      "r+",
+      constants.O_WRONLY,
+      constants.O_RDWR,
+      constants.O_CREAT,
+      constants.O_TRUNC,
+      constants.O_APPEND,
+    ]) {
+      for (const target of [existing, absent]) {
+        const result = execute([
+          "--input-type=module",
+          "-e",
+          `
+            import fs from "node:fs";
+            const target = ${JSON.stringify(target)}, flags = ${JSON.stringify(flags)};
+            ${call};
+          `,
+        ]);
+        expect(result.status, `${call}: ${flags}: ${result.stderr}`).toBe(91);
+        expect(result.stderr).toBe("ACCOUNTING_FORBIDDEN_IO\n");
+        expect(existsSync(absent)).toBe(false);
+        expect(readFileSync(existing, "utf8")).toBe(original);
+      }
+    }
+  });
+
   it("normalizes disjoint Codex deltas and Claude chunk revisions without credentials or network; snapshots replay exactly", () => {
     fixture("auth.json", [{ access_token: sentinel }]);
     const path = fixture("codex/sessions/2026/rollout.jsonl", [
@@ -149,14 +197,14 @@ describe("offline accounting executable", () => {
         counter(60, 10, 8, 2),
         "2026-10-07T12:01:00Z",
       ),
-      codex(counter(160, 30, 18, 5)),
+      codex(counter(160, 30, 18, 5), undefined, "2026-10-07T12:02:00Z"),
     ]);
     mkdirSync(join(home, "codex/archived_sessions"));
     copyFileSync(path, join(home, "codex/archived_sessions/copied.jsonl"));
     fixture("claude/projects/private/stream.jsonl", [
       claude(),
       claude(15, "2026-10-07T12:01:00Z"),
-      claude(12),
+      claude(12, "2026-10-07T12:03:00Z"),
     ]);
     fixture("codex/sessions/auth.jsonl", [{ access_token: sentinel }]);
     const args = [
@@ -173,53 +221,92 @@ describe("offline accounting executable", () => {
       "complete",
       "complete",
     ]);
-    expect(first.summary).toEqual([
+    expect(first).not.toHaveProperty("summary");
+    expect(first.records.map((r) => r.tokens)).toEqual([
       {
-        provider: "codex",
-        model: "gpt-5-codex",
-        records: 2,
-        tokens: {
-          input: 130,
-          cacheRead: 30,
-          cacheWrite5m: 0,
-          cacheWrite1h: 0,
-          cacheWriteUnknown: 0,
-          output: 18,
-          reasoning: 5,
-        },
+        input: 80,
+        cacheRead: 20,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
+        cacheWriteUnknown: 0,
+        output: 10,
+        reasoning: 3,
       },
       {
-        provider: "claude",
-        model: "claude-sonnet-4-5",
-        records: 1,
-        tokens: {
-          input: 100,
-          cacheRead: 200,
-          cacheWrite5m: 30,
-          cacheWrite1h: 40,
-          cacheWriteUnknown: 0,
-          output: 15,
-          reasoning: null,
-        },
+        input: 100,
+        cacheRead: 200,
+        cacheWrite5m: 30,
+        cacheWrite1h: 40,
+        cacheWriteUnknown: 0,
+        output: 15,
+        reasoning: null,
+      },
+      {
+        input: 50,
+        cacheRead: 10,
+        cacheWrite5m: 0,
+        cacheWrite1h: 0,
+        cacheWriteUnknown: 0,
+        output: 8,
+        reasoning: 2,
       },
     ]);
-    expect(first.records?.map((r) => r.contextTokens.value)).toEqual([
+    expect(first.sources.map((s) => s.evidence)).toEqual([
+      { first: time, last: "2026-10-07T12:02:00.000Z" },
+      { first: time, last: "2026-10-07T12:03:00.000Z" },
+    ]);
+    expect(first.records.map((r) => r.contextTokens.value)).toEqual([
       100, 370, 60,
     ]);
-    expect(first.records?.every((r) => r.account.status === "unknown")).toBe(
+    expect(first.records.every((r) => r.account.status === "unknown")).toBe(
       true,
     );
     expect(
-      first.records?.find(
-        (r) => r.provider === "codex" && r.tokens.output === 8,
-      )?.timestampPrecision,
+      first.records.find((r) => r.provider === "codex" && r.tokens.output === 8)
+        ?.timestampPrecision,
     ).toBe("second");
     expect(
-      first.records?.find((r) => r.provider === "claude")?.identity.scope,
+      first.records.find((r) => r.provider === "claude")?.identity.scope,
     ).toBe("vendor-request");
-    const compact = run(args, false);
-    expect(compact.records).toBeUndefined();
-    expect(compact.snapshot).toEqual(first.snapshot);
+  });
+
+  it("exports per-source revisions while earliest chunks own interval membership", () => {
+    fixture("full/projects/events.jsonl", [
+      claude(10, "2026-10-31T23:59:00Z"),
+      claude(15, "2026-11-01T00:01:00Z"),
+    ]);
+    fixture("copy/projects/events.jsonl", [claude(15, "2026-11-01T00:01:00Z")]);
+    const args = [
+      "--provider",
+      "claude",
+      "--claude-root",
+      join(home, "full"),
+      "--claude-root",
+      join(home, "copy"),
+    ];
+    const october = run(args);
+    const novemberResult = invoke([
+      "accounting",
+      "--from",
+      to,
+      "--to",
+      "2026-12-01T00:00:00Z",
+      ...args,
+    ]);
+    expect(novemberResult.status, novemberResult.stderr).toBe(0);
+    const november: AccountingResponse = JSON.parse(novemberResult.stdout);
+    expect(october.records).toHaveLength(1);
+    expect(november.records).toHaveLength(1);
+    expect(october.records[0].timestamp).toBe("2026-10-31T23:59:00.000Z");
+    expect(november.records[0].timestamp).toBe("2026-11-01T00:01:00.000Z");
+    expect(october.records[0].tokens.output).toBe(15);
+    expect(november.records[0].identity).toEqual(october.records[0].identity);
+    expect(november.records[0].sourceId).not.toBe(october.records[0].sourceId);
+    expect(october.sources.map((s) => s.evidence)).toEqual([
+      { first: "2026-10-31T23:59:00.000Z", last: "2026-11-01T00:01:00.000Z" },
+      { first: "2026-11-01T00:01:00.000Z", last: "2026-11-01T00:01:00.000Z" },
+    ]);
+    expect(november.sources).toEqual(october.sources);
   });
 
   it("reconstructs counters before interval filtering and exposes gaps, resets and fork baseline uncertainty", () => {
@@ -240,15 +327,21 @@ describe("offline accounting executable", () => {
       codex(counter(500, 100, 80), counter(20, 5, 3), "2026-10-07T12:04:00Z"),
     ]);
     const report = run(["--provider", "codex", "--codex-root", home]);
-    // Visible input: (60-10) + (40-5) + (10-2) + (20-5) = 108.
-    expect(report.summary[0].tokens).toEqual({
-      input: 108,
-      cacheRead: 22,
-      cacheWrite5m: 0,
-      cacheWrite1h: 0,
-      cacheWriteUnknown: 0,
-      output: 20,
-      reasoning: 0,
+    expect(
+      report.records.map((r) => [
+        r.tokens.input,
+        r.tokens.cacheRead,
+        r.tokens.output,
+      ]),
+    ).toEqual([
+      [50, 10, 8],
+      [35, 5, 7],
+      [8, 2, 2],
+      [15, 5, 3],
+    ]);
+    expect(report.sources[0].evidence).toEqual({
+      first: "2026-09-30T23:59:00.000Z",
+      last: "2026-10-07T12:04:00.000Z",
     });
     expect(report.sources[0]).toMatchObject({
       coverage: "partial",
@@ -270,7 +363,7 @@ describe("offline accounting executable", () => {
       .service_tier;
     fixture("projects/private/session.jsonl", [row]);
     const report = run(["--provider", "claude", "--claude-root", home]);
-    const record = report.records![0];
+    const record = report.records[0];
     expect(record.tokens).toMatchObject({
       cacheWrite5m: 0,
       cacheWrite1h: 0,
@@ -289,7 +382,7 @@ describe("offline accounting executable", () => {
     row.message.usage.input_tokens = -1;
     fixture("projects/private/session.jsonl", [row]);
     expect(
-      run(["--provider", "claude", "--claude-root", home]).summary[0].tokens
+      run(["--provider", "claude", "--claude-root", home]).records[0].tokens
         .input,
     ).toBeNull();
   });
@@ -301,7 +394,7 @@ describe("offline accounting executable", () => {
     ).reasoning_output_tokens;
     fixture("sessions/legacy.jsonl", [context, row]);
     const report = run(["--provider", "codex", "--codex-root", home]);
-    expect(report.summary[0].tokens).toMatchObject({
+    expect(report.records[0].tokens).toMatchObject({
       input: 80,
       cacheRead: 20,
       output: 10,
@@ -324,7 +417,12 @@ describe("offline accounting executable", () => {
       ["copilot", "unsupported"],
       ["cursor", "unsupported"],
     ]);
-    expect(report.summary).toEqual([]);
+    expect(report.records).toEqual([]);
+    expect(
+      report.sources.every(
+        (s) => s.evidence.first === null && s.evidence.last === null,
+      ),
+    ).toBe(true);
     const missing = run([
       "--provider",
       "codex",
@@ -351,11 +449,11 @@ describe("offline accounting executable", () => {
       replacementSafe: false,
       reasons: ["incomplete_tail", "symlink_skipped"],
     });
-    expect(partial.summary[0].tokens.output).toBe(10);
+    expect(partial.records[0].tokens.output).toBe(10);
     fixture("projects/a/session.jsonl", [claude(20)]);
     const rewritten = run(args);
     expect(rewritten.snapshot.id).not.toBe(partial.snapshot.id);
-    expect(rewritten.summary[0].tokens.output).toBe(20);
+    expect(rewritten.records[0].tokens.output).toBe(20);
     for (const [flag, value, reason] of [
       ["--max-bytes", "10", "byte_limit"],
       ["--max-line-bytes", "10", "line_byte_limit"],
@@ -385,15 +483,21 @@ describe("offline accounting executable", () => {
       `${sentinel}\n${JSON.stringify(claude())}\n${JSON.stringify(claude(99, to, { requestId: "excluded" }))}\n`,
     );
     const report = run(["--provider", "claude", "--claude-root", home]);
-    expect(report.summary[0].tokens.output).toBe(10);
+    expect(report.records).toHaveLength(1);
+    expect(report.records[0].tokens.output).toBe(10);
+    expect(report.sources[0].evidence).toEqual({
+      first: time,
+      last: "2026-11-01T00:00:00.000Z",
+    });
     expect(report.sources[0].reasons).toEqual(["malformed_record"]);
     for (const option of [
       "--allow-keychain-prompt",
       "--allow-claude-inference",
       "--profile-only",
+      "--records",
       `--${sentinel}`,
     ]) {
-      const result = invoke(["accounting", option]);
+      const result = invoke(["accounting", "--from", from, "--to", to, option]);
       expect(result.status).toBe(2);
       expect(result.stderr).toBe("");
       expect(result.stdout).not.toContain(sentinel);
@@ -402,9 +506,9 @@ describe("offline accounting executable", () => {
       invoke(["accounting", "--from", "2026-02-30T00:00:00Z", "--to", to])
         .status,
     ).toBe(2);
-    expect(invoke(["accounting", "--help"]).stdout).toContain(
-      "Local-only prototype",
-    );
+    const help = invoke(["accounting", "--help"]);
+    expect(help.stdout).toContain("normalized records with coverage");
+    expect(help.stdout).not.toContain("--records");
     // A path resembling a legacy command/flag is a value, never help or models.
     for (const value of ["models", "--help"]) {
       const result = run([
